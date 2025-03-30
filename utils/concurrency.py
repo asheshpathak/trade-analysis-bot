@@ -54,12 +54,14 @@ class ThreadPool:
             logger.error(f"Error in parallel processing: {str(e)}")
             return []
 
-    def execute(self, tasks: List[Tuple[Callable, List[Any], Dict[str, Any]]]) -> List[Any]:
+    def execute(self, tasks: List[Tuple[Callable, List[Any], Dict[str, Any]]],
+               progress_callback: Optional[Callable[[Any], None]] = None) -> List[Any]:
         """
         Execute multiple tasks in parallel.
 
         Args:
             tasks: List of tuples (function, args, kwargs)
+            progress_callback: Optional callback function to report progress
 
         Returns:
             List of results
@@ -71,7 +73,15 @@ class ThreadPool:
                 future = self.executor.submit(func, *args, **kwargs)
                 futures.append(future)
 
-            results = [future.result() for future in concurrent.futures.as_completed(futures)]
+            results = []
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                results.append(result)
+
+                # Call progress callback if provided
+                if progress_callback:
+                    progress_callback(result)
+
             return results
         except Exception as e:
             logger.error(f"Error executing parallel tasks: {str(e)}")
@@ -124,12 +134,14 @@ class ProcessPool:
             logger.error(f"Error in parallel processing: {str(e)}")
             return []
 
-    def execute(self, tasks: List[Tuple[Callable, List[Any], Dict[str, Any]]]) -> List[Any]:
+    def execute(self, tasks: List[Tuple[Callable, List[Any], Dict[str, Any]]],
+               progress_callback: Optional[Callable[[Any], None]] = None) -> List[Any]:
         """
         Execute multiple tasks in parallel.
 
         Args:
             tasks: List of tuples (function, args, kwargs)
+            progress_callback: Optional callback function to report progress
 
         Returns:
             List of results
@@ -141,7 +153,15 @@ class ProcessPool:
                 future = self.executor.submit(func, *args, **kwargs)
                 futures.append(future)
 
-            results = [future.result() for future in concurrent.futures.as_completed(futures)]
+            results = []
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                results.append(result)
+
+                # Call progress callback if provided
+                if progress_callback:
+                    progress_callback(result)
+
             return results
         except Exception as e:
             logger.error(f"Error executing parallel tasks: {str(e)}")

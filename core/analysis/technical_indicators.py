@@ -267,6 +267,9 @@ class TechnicalIndicators:
             price = self.data["close"].iloc[-1]
             ma_score = 0
 
+            # Add this line to define the missing variable
+            price_above_sma50 = price > sma50
+
             if price > sma20 > sma50 > sma200:
                 # Strong uptrend
                 ma_score = 100

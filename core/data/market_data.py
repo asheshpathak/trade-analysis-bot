@@ -422,6 +422,75 @@ class MarketData:
 
         return result
 
+    def get_market_data_with_rate_limits(self, symbol: str, historical_delay: float = 0.5, other_delay: float = 0.2) -> Dict[str, Any]:
+        """
+        Get comprehensive market data for a symbol with rate limiting.
+
+        Args:
+            symbol: Stock symbol
+            historical_delay: Delay in seconds after historical data API calls
+            other_delay: Delay in seconds after other API calls
+
+        Returns:
+            Dictionary with market data for the symbol
+        """
+        # Check if we need to fetch live data or use historical
+        is_market_open = self.is_market_open()
+        logger.info(f"Market status: {'Open' if is_market_open else 'Closed'}")
+
+        # Add delay after market status check
+        time.sleep(other_delay)
+
+        # Get historical data for analysis regardless of market status
+        historical_df = self.fetch_historical_data(symbol)
+
+        # Add delay after historical data API call
+        time.sleep(historical_delay)
+
+        # If market is open, get live data, otherwise use the latest historical data
+        if is_market_open:
+            # For live market, we would make separate API calls
+            # But here we'll simulate with a delay
+            time.sleep(other_delay)
+
+            # Normally we'd fetch live data like this:
+            # live_data = self.fetch_live_market_data().get(symbol, {})
+            # But since we want to minimize API calls, we'll just use historical
+
+            current_price = historical_df.iloc[-1]["close"] if historical_df is not None else None
+            volume = historical_df.iloc[-1]["volume"] if historical_df is not None else None
+        else:
+            current_price = historical_df.iloc[-1]["close"] if historical_df is not None else None
+            volume = historical_df.iloc[-1]["volume"] if historical_df is not None else None
+
+        # Get previous close
+        previous_close = historical_df.iloc[-2]["close"] if historical_df is not None and len(historical_df) > 1 else None
+
+        # Calculate volatility
+        volatility = self._calculate_volatility(historical_df) if historical_df is not None else None
+
+        # Get option chain data
+        option_chain = self.fetch_option_chain(symbol)
+
+        # Add delay after option chain API call
+        time.sleep(other_delay)
+
+        # Compile all data
+        result = {
+            "symbol": symbol,
+            "previous_close": previous_close,
+            "current_price": current_price,
+            "volatility_percent": volatility,
+            "market_status": "Open" if is_market_open else "Closed",
+            "last_update_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "historical_data": historical_df,
+            "option_chain": option_chain,
+            "volume": volume,
+            "volume_change_percent": self._calculate_volume_change(historical_df) if historical_df is not None else None,
+        }
+
+        return result
+
     def _calculate_volatility(self, df: pd.DataFrame) -> float:
         """
         Calculate historical volatility.

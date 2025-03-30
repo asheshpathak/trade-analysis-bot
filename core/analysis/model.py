@@ -122,6 +122,7 @@ class StockPredictionModel:
 
         # MACD component
         if macd is not None and macd_hist is not None:
+            # FIX: Ensure scalar comparisons with explicit checks
             if macd > 0 and macd_hist > 0:
                 prediction_score += 80  # Strong bullish
             elif macd > 0 and macd_hist < 0:

@@ -14,8 +14,6 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # API Keys and credentials
 ZERODHA_API_KEY = os.getenv("ZERODHA_API_KEY")
 ZERODHA_API_SECRET = os.getenv("ZERODHA_API_SECRET")
-ZERODHA_USER_ID = os.getenv("ZERODHA_USER_ID")
-ZERODHA_PASSWORD = os.getenv("ZERODHA_PASSWORD")
 
 # API settings
 API_HOST = os.getenv("API_HOST", "0.0.0.0")

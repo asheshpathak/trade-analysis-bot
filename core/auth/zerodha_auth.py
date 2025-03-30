@@ -1,20 +1,186 @@
 """
-Zerodha Kite API authentication module with simplified authentication.
+Zerodha Kite API authentication module with automated OAuth flow.
+Uses a Flask server to capture authentication callback.
 """
+import os
 import time
-from typing import Dict, Optional, Tuple
 import threading
-
-import requests
+import ssl
+import logging
+from datetime import datetime, timedelta
+import pytz
+from flask import Flask, request
 from kiteconnect import KiteConnect
 from loguru import logger
 
-from config.settings import (
-    ZERODHA_API_KEY,
-    ZERODHA_API_SECRET,
-    ZERODHA_USER_ID,
-    ZERODHA_PASSWORD,
-)
+# Files for token storage
+ACCESS_TOKEN_FILE = "access_token.txt"
+TOKEN_TIMESTAMP_FILE = "token_timestamp.txt"
+CERT_FILE = "cert.pem"
+KEY_FILE = "key.pem"
+
+# Callback configuration
+CALLBACK_HOST = "localhost"
+CALLBACK_PORT = 5000
+CALLBACK_PATH = "/redirect"
+CALLBACK_URL = f"https://{CALLBACK_HOST}:{CALLBACK_PORT}{CALLBACK_PATH}"
+
+# Flask app for OAuth callback
+app = Flask(__name__)
+flask_server_running = False
+token_holder = {"token": None}
+
+
+@app.route(CALLBACK_PATH)
+def oauth_callback():
+    """
+    Zerodha will redirect to this endpoint after a successful login.
+    Captures the request token, generates the session, and saves the access token.
+    """
+    req_token = request.args.get("request_token")
+    if req_token:
+        try:
+            logger.info(f"Got request token: {req_token}")
+            kite = KiteConnect(api_key=token_holder["api_key"])
+            session_data = kite.generate_session(req_token, api_secret=token_holder["api_secret"])
+            access_token = session_data["access_token"]
+            token_holder["token"] = access_token
+
+            # Save token to file
+            with open(ACCESS_TOKEN_FILE, "w") as f:
+                f.write(access_token)
+
+            # Save timestamp
+            with open(TOKEN_TIMESTAMP_FILE, "w") as f:
+                f.write(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+            logger.info("Access token generated and saved successfully.")
+            return """
+            <html>
+                <body style='font-family: Arial, sans-serif; text-align: center; padding: 50px;'>
+                    <h2 style='color: #4CAF50;'>Access token generated successfully!</h2>
+                    <p>You can close this window and return to the application.</p>
+                </body>
+            </html>
+            """
+        except Exception as e:
+            logger.error(f"Error generating session: {e}")
+            return f"""
+            <html>
+                <body style='font-family: Arial, sans-serif; text-align: center; padding: 50px;'>
+                    <h2 style='color: #F44336;'>Error generating session</h2>
+                    <p>{str(e)}</p>
+                    <p>Please try again.</p>
+                </body>
+            </html>
+            """
+    else:
+        return """
+        <html>
+            <body style='font-family: Arial, sans-serif; text-align: center; padding: 50px;'>
+                <h2 style='color: #F44336;'>No request token received</h2>
+                <p>No request_token parameter was found in the URL.</p>
+                <p>Please try the login process again.</p>
+            </body>
+        </html>
+        """
+
+
+def generate_ssl_cert():
+    """Generate self-signed SSL certificates for HTTPS if they don't exist."""
+    if not os.path.exists(CERT_FILE) or not os.path.exists(KEY_FILE):
+        logger.info("Generating self-signed SSL certificates for HTTPS...")
+        try:
+            from OpenSSL import crypto
+
+            # Create key pair
+            k = crypto.PKey()
+            k.generate_key(crypto.TYPE_RSA, 2048)
+
+            # Create self-signed certificate
+            cert = crypto.X509()
+            cert.get_subject().CN = CALLBACK_HOST
+            cert.set_serial_number(1000)
+            cert.gmtime_adj_notBefore(0)
+            cert.gmtime_adj_notAfter(10 * 365 * 24 * 60 * 60)  # 10 years
+            cert.set_issuer(cert.get_subject())
+            cert.set_pubkey(k)
+            cert.sign(k, 'sha256')
+
+            # Save certificate and key files
+            with open(CERT_FILE, "wb") as f:
+                f.write(crypto.dump_certificate(crypto.FILETYPE_PEM, cert))
+            with open(KEY_FILE, "wb") as f:
+                f.write(crypto.dump_privatekey(crypto.FILETYPE_PEM, k))
+
+            logger.info(f"SSL certificates generated: {CERT_FILE} and {KEY_FILE}")
+        except Exception as e:
+            logger.error(f"Failed to generate SSL certificates: {e}")
+            logger.error("Please install pyOpenSSL: pip install pyOpenSSL")
+            logger.error("Or manually create SSL certificates using OpenSSL.")
+            raise
+
+
+def run_flask_server():
+    """Run an HTTPS server with self-signed certificates for OAuth callback."""
+    global flask_server_running
+
+    if flask_server_running:
+        return
+
+    # Generate certificates if needed
+    generate_ssl_cert()
+
+    try:
+        # Create SSL context
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(CERT_FILE, KEY_FILE)
+
+        # Mark server as running
+        flask_server_running = True
+
+        # Run Flask with SSL
+        app.run(host="0.0.0.0", port=CALLBACK_PORT, ssl_context=context, debug=False, use_reloader=False)
+    except Exception as e:
+        logger.error(f"Error starting Flask server: {e}")
+        flask_server_running = False
+
+
+def is_token_valid():
+    """
+    Checks if the access token exists and is not expired.
+    Zerodha tokens typically expire at 6 AM IST the next day.
+    """
+    if not os.path.exists(ACCESS_TOKEN_FILE) or not os.path.exists(TOKEN_TIMESTAMP_FILE):
+        return False
+
+    try:
+        with open(TOKEN_TIMESTAMP_FILE, "r") as f:
+            timestamp_str = f.read().strip()
+            token_time = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+
+        # Check if token was generated today and it's before 6 AM IST tomorrow
+        india_tz = pytz.timezone("Asia/Kolkata")
+        now = datetime.now(india_tz)
+        token_time = token_time.replace(tzinfo=india_tz)
+        expiry_time = (token_time.replace(hour=6, minute=0, second=0) + timedelta(days=1))
+
+        return now < expiry_time
+    except Exception as e:
+        logger.error(f"Error checking token validity: {e}")
+        return False
+
+
+def test_token(api_key, token):
+    """Tests if the token is valid by making a simple API call."""
+    try:
+        kite = KiteConnect(api_key=api_key)
+        kite.set_access_token(token)
+        profile = kite.profile()  # This will fail if token is invalid
+        return True
+    except Exception as e:
+        logger.error(f"Token validation failed: {e}")
+        return False
 
 
 class ZerodhaAuth:
@@ -37,24 +203,23 @@ class ZerodhaAuth:
             return cls._instance
 
     def __init__(self):
+        """Initialize connection on startup."""
         if self._initialized:
             return
 
+        from config.settings import (
+            ZERODHA_API_KEY,
+            ZERODHA_API_SECRET
+        )
+
         self.api_key = ZERODHA_API_KEY
         self.api_secret = ZERODHA_API_SECRET
-        self.user_id = ZERODHA_USER_ID
-        self.password = ZERODHA_PASSWORD
-
         self.kite = KiteConnect(api_key=self.api_key)
         self.access_token = None
-        self.token_expiry = None
-        self.refresh_in_progress = False
-        self.refresh_lock = threading.Lock()
 
         # Validate required config
         self._validate_config()
 
-        # Initialize connection on startup
         self._initialized = True
         logger.info("Zerodha authentication module initialized")
 
@@ -66,123 +231,82 @@ class ZerodhaAuth:
             missing_configs.append("ZERODHA_API_KEY")
         if not self.api_secret:
             missing_configs.append("ZERODHA_API_SECRET")
-        if not self.user_id:
-            missing_configs.append("ZERODHA_USER_ID")
-        if not self.password:
-            missing_configs.append("ZERODHA_PASSWORD")
 
         if missing_configs:
             error_msg = f"Missing required Zerodha API configuration: {', '.join(missing_configs)}"
             logger.error(error_msg)
             raise ValueError(error_msg)
 
-    def _login(self) -> Tuple[bool, Optional[str], Optional[str]]:
-        """
-        Login to Zerodha and obtain request token.
-
-        Returns:
-            Tuple[bool, Optional[str], Optional[str]]: Success status, request token, and error message if any
-        """
-        try:
-            # In a real implementation, this would use the Zerodha login API
-            # For now, we'll simulate the login and request token generation
-
-            logger.info(f"Attempting login for user {self.user_id}")
-
-            # Simulate a login API call
-            login_url = "https://kite.zerodha.com/api/login"
-            headers = {"Content-Type": "application/x-www-form-urlencoded"}
-            data = {
-                "user_id": self.user_id,
-                "password": self.password
-            }
-
-            # Note: In a real implementation, we would make an actual API call
-            # response = requests.post(login_url, headers=headers, data=data)
-            # Here we're just simulating the flow without making real API calls
-
-            # For demonstration purposes, generate a dummy request token
-            request_token = f"demo_request_token_{int(time.time())}"
-
-            logger.info(f"Login successful, obtained request token")
-            return True, request_token, None
-
-        except Exception as e:
-            error_msg = f"Login failed with exception: {str(e)}"
-            logger.error(error_msg)
-            return False, None, error_msg
-
-    def _generate_session(self) -> Tuple[bool, Optional[str]]:
-        """
-        Generate a new session with access token.
-
-        Returns:
-            Tuple[bool, Optional[str]]: Success status and error message if any
-        """
-        try:
-            logger.info("Generating new Zerodha API session")
-
-            # First perform login to get request token
-            login_success, request_token, login_error = self._login()
-            if not login_success:
-                return False, login_error
-
-            # In a real implementation, we would exchange the request token for an access token
-            # For demonstration purposes, we'll simulate this step
-
-            # Simulate session token generation
-            # In a real application: session = self.kite.generate_session(request_token, api_secret=self.api_secret)
-            self.access_token = f"demo_access_token_{int(time.time())}"
-
-            # Set the access token in the kite connect instance
-            self.kite.set_access_token(self.access_token)
-
-            # Set token expiry (for simulation, set to 24 hours)
-            current_time = time.time()
-            self.token_expiry = current_time + (24 * 3600)
-
-            logger.info("Successfully generated Zerodha API session")
-            return True, None
-
-        except Exception as e:
-            error_msg = f"Failed to generate Zerodha API session: {str(e)}"
-            logger.error(error_msg)
-            return False, error_msg
-
-    def _is_token_valid(self) -> bool:
-        """Check if the current token is still valid."""
-        if not self.access_token or not self.token_expiry:
-            return False
-
-        # Add a buffer of 5 minutes
-        buffer = 5 * 60
-        return time.time() < (self.token_expiry - buffer)
-
-    def get_kite_client(self) -> Tuple[Optional[KiteConnect], Optional[str]]:
+    def get_kite_client(self):
         """
         Get an authenticated Kite client instance.
 
         Returns:
             Tuple[Optional[KiteConnect], Optional[str]]: KiteConnect instance and error message if any
         """
-        with self.refresh_lock:
-            # Check if token needs refresh
-            if not self._is_token_valid():
-                # Token expired, generate a new session
-                success, error = self._generate_session()
-                if not success:
-                    return None, error
+        # Make sure we have a valid access token
+        self.access_token = self.get_access_token()
 
-            return self.kite, None
+        if not self.access_token:
+            return None, "Failed to get valid access token"
 
-    def refresh_token(self) -> Tuple[bool, Optional[str]]:
+        # Set the access token in the kite connect instance
+        self.kite.set_access_token(self.access_token)
+
+        return self.kite, None
+
+    def get_access_token(self):
         """
-        Force a token refresh regardless of current state.
-
-        Returns:
-            Tuple[bool, Optional[str]]: Success status and error message if any
+        Gets a valid access token, either from file or by initiating the login process.
         """
-        with self.refresh_lock:
-            self.access_token = None
-            self.token_expiry = None
-            return self._generate_session()
+        global token_holder
+
+        # Store API credentials in token_holder for OAuth callback
+        token_holder["api_key"] = self.api_key
+        token_holder["api_secret"] = self.api_secret
+
+        # Check if we have a valid token already
+        if is_token_valid():
+            with open(ACCESS_TOKEN_FILE, "r") as f:
+                token = f.read().strip()
+
+            # Verify token works
+            if test_token(self.api_key, token):
+                logger.info("Using existing valid access token.")
+                return token
+            else:
+                logger.warning("Existing token failed validation.")
+
+        # Start the Flask server in a separate thread if not already running
+        if not flask_server_running:
+            flask_thread = threading.Thread(target=run_flask_server, daemon=True)
+            flask_thread.start()
+            time.sleep(1)  # Give the server a moment to start
+
+        # Reset token holder
+        token_holder["token"] = None
+
+        # Generate login URL
+        login_url = self.kite.login_url()
+
+        # Display login instructions
+        logger.info("\n" + "=" * 80)
+        logger.info("ACCESS TOKEN REQUIRED")
+        logger.info("=" * 80)
+        logger.info("Please open the following URL in your browser and log in:")
+        logger.info(login_url)
+        logger.info(f"After logging in, you will be redirected to {CALLBACK_URL}")
+        logger.info("Note: You may need to accept the self-signed certificate in your browser.")
+        logger.info("=" * 80 + "\n")
+
+        # Wait for token with timeout
+        timeout = 300  # 5 minutes
+        start_time = time.time()
+        while token_holder["token"] is None:
+            if time.time() - start_time > timeout:
+                logger.error("Timeout waiting for access token.")
+                raise Exception("Timeout waiting for access token")
+            time.sleep(1)
+
+        logger.info("Access token obtained successfully.")
+        return token_holder["token"]

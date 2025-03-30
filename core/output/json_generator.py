@@ -3,12 +3,25 @@ JSON output generator for stock analysis results.
 """
 import json
 import os
+import numpy as np
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 from loguru import logger
 
 from config.settings import OUTPUT_DIR, JSON_FILENAME
+
+
+# Custom JSON encoder to handle numpy types
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (np.integer, np.int64)):
+            return int(obj)
+        elif isinstance(obj, (np.floating, np.float64)):
+            return float(obj)
+        elif isinstance(obj, (np.ndarray,)):
+            return obj.tolist()
+        return super(NumpyEncoder, self).default(obj)
 
 
 class JSONGenerator:
@@ -71,9 +84,9 @@ class JSONGenerator:
                     "stocks": [self._structure_stock_data(result) for result in valid_results]
                 }
 
-            # Write to JSON file
+            # Write to JSON file with the custom encoder
             with open(self.filename, 'w') as f:
-                json.dump(structured_results, f, indent=2)
+                json.dump(structured_results, f, indent=2, cls=NumpyEncoder)
 
             logger.info(f"Successfully generated JSON output: {self.filename}")
             return self.filename

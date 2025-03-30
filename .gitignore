@@ -1,5 +1,7 @@
 # Environment variables
 .env
+secrets.env
+credentials.json
 
 # Python
 __pycache__/
@@ -28,21 +30,36 @@ wheels/
 venv/
 ENV/
 env/
+.venv/
 
 # Logs
 logs/
 *.log
+log.txt
 
 # Output files
 output/
 *.csv
 *.json
+*.xlsx
+*.xls
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
 
 # IDE files
 .idea/
 .vscode/
 *.swp
 *.swo
+.project
+.pydevproject
+.settings/
+*.sublime-workspace
+*.sublime-project
 
 # OS files
 .DS_Store
@@ -52,3 +69,26 @@ output/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Data and model files that might be large
+*.h5
+*.pickle
+*.pkl
+*.joblib
+*.model
+*.bin
+
+# Configuration files that might contain sensitive information
+config.yaml
+config.yml
+config.json
+settings.json
+settings.yaml
+settings.yml
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
