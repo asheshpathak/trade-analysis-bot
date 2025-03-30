@@ -1,0 +1,91 @@
+version: '3.8'
+
+services:
+  # API Service
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: stock-analysis-api
+    container_name: stock-analysis-api
+    restart: unless-stopped
+    environment:
+      - APP_MODE=api
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - LOG_LEVEL=INFO
+      - ZERODHA_API_KEY=${ZERODHA_API_KEY}
+      - ZERODHA_API_SECRET=${ZERODHA_API_SECRET}
+      - ZERODHA_USER_ID=${ZERODHA_USER_ID}
+      - ZERODHA_PASSWORD=${ZERODHA_PASSWORD}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./logs:/app/logs
+      - ./output:/app/output
+    networks:
+      - stock-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Worker Service for Periodic Analysis
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: stock-analysis-worker
+    container_name: stock-analysis-worker
+    restart: unless-stopped
+    environment:
+      - APP_MODE=periodic
+      - UPDATE_INTERVAL=3600
+      - LOG_LEVEL=INFO
+      - ZERODHA_API_KEY=${ZERODHA_API_KEY}
+      - ZERODHA_API_SECRET=${ZERODHA_API_SECRET}
+      - ZERODHA_USER_ID=${ZERODHA_USER_ID}
+      - ZERODHA_PASSWORD=${ZERODHA_PASSWORD}
+    volumes:
+      - ./logs:/app/logs
+      - ./output:/app/output
+    networks:
+      - stock-network
+    depends_on:
+      - api
+
+  # Redis for caching (optional, for future scaling)
+  redis:
+    image: redis:alpine
+    container_name: stock-analysis-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - stock-network
+    command: redis-server --appendonly yes
+
+  # Web Server (for API documentation and future web interface)
+  nginx:
+    image: nginx:alpine
+    container_name: stock-analysis-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/html:/usr/share/nginx/html
+    networks:
+      - stock-network
+    depends_on:
+      - api
+
+networks:
+  stock-network:
+    driver: bridge
+
+volumes:
+  redis-data:
