@@ -3,6 +3,7 @@ Market data fetching module for stock analysis application.
 """
 import datetime
 import time
+import os
 from typing import Dict, List, Optional, Tuple, Union, Any
 
 import numpy as np
@@ -31,6 +32,9 @@ class MarketData:
     - Fetch live market data when market is open
     - Process and prepare data for analysis
     """
+
+    # Class attribute to track last historical data request time
+    _last_historical_request = 0
 
     def __init__(self, symbols: Optional[List[str]] = None):
         """
@@ -172,6 +176,133 @@ class MarketData:
         except Exception as e:
             logger.error(f"Error fetching historical data for {symbol}: {str(e)}")
             return None
+
+    # Update this method in market_data.py
+
+    def fetch_historical_data_rate_limited(self, symbol: str, interval: str = "day", days: int = 365) -> Optional[
+        pd.DataFrame]:
+        """
+        Fetch historical data with proper rate limiting.
+
+        Zerodha restricts historical data API to 3 requests per minute.
+        This implementation uses 1 request per minute to be more conservative.
+
+        Args:
+            symbol: Stock symbol
+            interval: Data interval (minute, day, etc.)
+            days: Number of days of historical data
+
+        Returns:
+            DataFrame with historical data or None if fetch fails
+        """
+        # Check cache first
+        cache_dir = os.path.join("output", "historical_cache")
+        os.makedirs(cache_dir, exist_ok=True)
+
+        cache_file = os.path.join(cache_dir, f"{symbol.lower()}_historical.pkl")
+
+        # Try to load from cache first
+        if os.path.exists(cache_file):
+            try:
+                logger.info(f"Loading cached historical data for {symbol}")
+                df = pd.read_pickle(cache_file)
+                logger.info(f"Successfully loaded cached historical data for {symbol}: {len(df)} records")
+                return df
+            except Exception as e:
+                logger.warning(f"Could not load cached data for {symbol}: {e}")
+
+        # Get current time
+        current_time = time.time()
+
+        # Calculate time since last request - using class variable
+        time_since_last_request = current_time - self.__class__._last_historical_request
+
+        # Wait if needed to respect the rate limits - conservative approach: 1 request per minute
+        if time_since_last_request < 60:  # 60 seconds = 1 minute
+            wait_time = 60 - time_since_last_request
+            logger.info(f"Rate limiting: Waiting {wait_time:.2f}s before historical data request")
+            time.sleep(wait_time)
+
+        # Update the last request time
+        self.__class__._last_historical_request = time.time()
+
+        # Make the request with retry logic
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(f"Fetching historical data for {symbol} (attempt {attempt}/{max_retries})")
+
+                # Fetch historical data
+                kite, error = self.get_kite_client()
+                if error:
+                    logger.error(f"Failed to get kite client: {error}")
+                    return None
+
+                # Calculate from and to dates
+                to_date = datetime.datetime.now()
+                from_date = to_date - datetime.timedelta(days=days)
+
+                # Get instrument token
+                instruments = kite.instruments("NSE")
+                instrument_token = None
+
+                for instrument in instruments:
+                    if instrument["tradingsymbol"] == symbol:
+                        instrument_token = instrument["instrument_token"]
+                        break
+
+                if not instrument_token:
+                    logger.error(f"Could not find instrument token for {symbol}")
+                    return None
+
+                # Fetch historical data
+                data = kite.historical_data(
+                    instrument_token=instrument_token,
+                    from_date=from_date.strftime("%Y-%m-%d"),
+                    to_date=to_date.strftime("%Y-%m-%d"),
+                    interval=interval
+                )
+
+                if not data:
+                    logger.error(f"No historical data returned for {symbol}")
+                    return None
+
+                # Convert to DataFrame
+                df = pd.DataFrame(data)
+                df.set_index("date", inplace=True)
+
+                # Cache the data
+                try:
+                    df.to_pickle(cache_file)
+                    logger.info(f"Cached historical data for {symbol}")
+                except Exception as e:
+                    logger.warning(f"Failed to cache historical data: {e}")
+
+                # Also add to in-memory cache
+                self.historical_data_cache[symbol] = df
+
+                logger.info(f"Successfully fetched historical data for {symbol}: {len(df)} records")
+                return df
+
+            except Exception as e:
+                error_message = str(e)
+                logger.error(f"Error fetching historical data for {symbol}: {error_message}")
+
+                # If rate limited, wait longer before retry
+                if "too many requests" in error_message.lower() or "rate limit" in error_message.lower():
+                    if attempt < max_retries:
+                        # Exponential backoff - wait longer with each retry
+                        wait_time = 60 * (2 ** attempt)  # 2min, 4min, 8min
+                        logger.warning(f"Rate limit hit. Waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
+
+                        # Update the class variable to prevent other requests during this wait
+                        self.__class__._last_historical_request = time.time() + wait_time - 60
+
+                        time.sleep(wait_time)
+                        continue
+
+                # For other errors or if we've exhausted retries
+                return None
 
     def fetch_live_market_data(self) -> Dict[str, Dict]:
         """
@@ -386,16 +517,33 @@ class MarketData:
         logger.info(f"Market status: {'Open' if is_market_open else 'Closed'}")
 
         # Get historical data for analysis regardless of market status
-        historical_df = self.fetch_historical_data(symbol)
+        # Use rate-limited version
+        historical_df = self.fetch_historical_data_rate_limited(symbol)
+
+        # If historical data fetch/load failed
+        if historical_df is None or historical_df.empty:
+            logger.error(f"Failed to get historical data for {symbol}")
+            return {}
 
         # If market is open, get live data, otherwise use the latest historical data
         if is_market_open:
-            live_data = self.fetch_live_market_data().get(symbol, {})
-            current_price = live_data.get("current_price", None)
-            volume = live_data.get("volume", None)
+            try:
+                logger.info(f"Market is open, fetching minimal live data for {symbol}")
+                current_price = self._get_current_price(symbol)
+
+                if current_price is None:
+                    logger.warning(f"Using historical close price for {symbol}")
+                    current_price = historical_df.iloc[-1]["close"]
+
+                volume = historical_df.iloc[-1]["volume"]
+            except Exception as e:
+                logger.warning(f"Error fetching live data, using historical: {e}")
+                current_price = historical_df.iloc[-1]["close"]
+                volume = historical_df.iloc[-1]["volume"]
         else:
-            current_price = historical_df.iloc[-1]["close"] if historical_df is not None else None
-            volume = historical_df.iloc[-1]["volume"] if historical_df is not None else None
+            logger.info(f"Market is closed, using historical data for {symbol}")
+            current_price = historical_df.iloc[-1]["close"]
+            volume = historical_df.iloc[-1]["volume"]
 
         # Get previous close
         previous_close = historical_df.iloc[-2]["close"] if historical_df is not None and len(historical_df) > 1 else None
@@ -403,8 +551,9 @@ class MarketData:
         # Calculate volatility
         volatility = self._calculate_volatility(historical_df) if historical_df is not None else None
 
-        # Get option chain data
-        option_chain = self.fetch_option_chain(symbol)
+        # Skip option chain to reduce API calls
+        logger.info(f"Skipping option chain fetch for {symbol} to avoid rate limits")
+        option_chain = None
 
         # Compile all data
         result = {
@@ -434,34 +583,47 @@ class MarketData:
         Returns:
             Dictionary with market data for the symbol
         """
-        # Check if we need to fetch live data or use historical
+        # Using the rate-limited fetch for historical data
+        logger.info(f"Fetching market data with rate limits for {symbol}")
+
+        # Check market status
+        logger.info(f"Checking market status for {symbol}")
         is_market_open = self.is_market_open()
         logger.info(f"Market status: {'Open' if is_market_open else 'Closed'}")
 
         # Add delay after market status check
         time.sleep(other_delay)
 
-        # Get historical data for analysis regardless of market status
-        historical_df = self.fetch_historical_data(symbol)
+        # Get historical data using rate-limited version
+        logger.info(f"Fetching historical data for {symbol} (rate-limited)")
+        historical_df = self.fetch_historical_data_rate_limited(symbol)
 
-        # Add delay after historical data API call
-        time.sleep(historical_delay)
+        # If historical data fetch/load failed
+        if historical_df is None or historical_df.empty:
+            logger.error(f"Failed to get historical data for {symbol}")
+            return {}
 
-        # If market is open, get live data, otherwise use the latest historical data
+        # If market is open, get minimal live data, otherwise use historical
         if is_market_open:
-            # For live market, we would make separate API calls
-            # But here we'll simulate with a delay
-            time.sleep(other_delay)
+            time.sleep(other_delay)  # Add delay before API call
 
-            # Normally we'd fetch live data like this:
-            # live_data = self.fetch_live_market_data().get(symbol, {})
-            # But since we want to minimize API calls, we'll just use historical
+            try:
+                logger.info(f"Market is open, fetching minimal live data for {symbol}")
+                current_price = self._get_current_price(symbol)
+                time.sleep(other_delay)  # Add delay after API call
+            except Exception as e:
+                logger.warning(f"Error fetching live data: {str(e)}")
+                current_price = None
 
-            current_price = historical_df.iloc[-1]["close"] if historical_df is not None else None
-            volume = historical_df.iloc[-1]["volume"] if historical_df is not None else None
+            if current_price is None:
+                logger.warning(f"Using historical close price for {symbol}")
+                current_price = historical_df.iloc[-1]["close"]
+
+            volume = historical_df.iloc[-1]["volume"]
         else:
-            current_price = historical_df.iloc[-1]["close"] if historical_df is not None else None
-            volume = historical_df.iloc[-1]["volume"] if historical_df is not None else None
+            logger.info(f"Market is closed, using historical data for {symbol}")
+            current_price = historical_df.iloc[-1]["close"]
+            volume = historical_df.iloc[-1]["volume"]
 
         # Get previous close
         previous_close = historical_df.iloc[-2]["close"] if historical_df is not None and len(historical_df) > 1 else None
@@ -469,11 +631,9 @@ class MarketData:
         # Calculate volatility
         volatility = self._calculate_volatility(historical_df) if historical_df is not None else None
 
-        # Get option chain data
-        option_chain = self.fetch_option_chain(symbol)
-
-        # Add delay after option chain API call
-        time.sleep(other_delay)
+        # Skip option chain to reduce API calls
+        logger.info(f"Skipping option chain fetch for {symbol} to avoid rate limits")
+        option_chain = None
 
         # Compile all data
         result = {
@@ -489,7 +649,34 @@ class MarketData:
             "volume_change_percent": self._calculate_volume_change(historical_df) if historical_df is not None else None,
         }
 
+        logger.info(f"Market data fetch completed for {symbol}")
         return result
+
+    def _get_current_price(self, symbol: str) -> Optional[float]:
+        """
+        Fetch only the current price for a symbol to minimize API calls.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Current price or None if fetch fails
+        """
+        try:
+            kite, error = self.get_kite_client()
+            if error:
+                logger.error(f"Failed to get kite client: {error}")
+                return None
+
+            # Get quote for single symbol
+            quote = kite.quote([symbol])
+            if not quote or symbol not in quote:
+                return None
+
+            return quote[symbol]["last_price"]
+        except Exception as e:
+            logger.error(f"Error fetching current price for {symbol}: {str(e)}")
+            return None
 
     def _calculate_volatility(self, df: pd.DataFrame) -> float:
         """

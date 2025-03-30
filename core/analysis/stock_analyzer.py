@@ -1,6 +1,8 @@
 """
 Main stock analyzer module that coordinates the analysis process.
 """
+import os
+import json
 from datetime import datetime
 from typing import Dict, List, Optional
 import time
@@ -174,6 +176,19 @@ class StockAnalyzer:
             }
 
             logger.info(f"Analysis completed for {symbol}")
+
+            # Save to cache directory for future reference
+            cache_dir = os.path.join("output", "cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, f"{symbol.lower()}.json")
+
+            try:
+                with open(cache_file, 'w') as f:
+                    json.dump(results, f)
+                logger.info(f"Saved analysis for {symbol} to cache")
+            except Exception as e:
+                logger.warning(f"Could not save analysis to cache: {e}")
+
             return results
 
         except Exception as e:
@@ -199,7 +214,33 @@ class StockAnalyzer:
         try:
             logger.info(f"Starting rate-limited analysis for {symbol}")
 
+            # First check if we already have results in cache
+            cache_dir = os.path.join("output", "cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, f"{symbol.lower()}.json")
+
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, 'r') as f:
+                        cached_result = json.load(f)
+
+                    # Check if result is from today
+                    if "analysis_timestamp" in cached_result:
+                        timestamp = cached_result["analysis_timestamp"]
+                        try:
+                            analysis_date = datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").date()
+                            today = datetime.now().date()
+
+                            if analysis_date == today:
+                                logger.info(f"Using cached analysis for {symbol} from today")
+                                return cached_result
+                        except Exception:
+                            pass
+                except Exception as e:
+                    logger.warning(f"Could not load cached result: {e}")
+
             # Step 1: Fetch market data (with delay for historical data)
+            logger.info(f"Fetching market data for {symbol}")
             market_data = self.market_data.get_market_data_with_rate_limits(
                 symbol,
                 historical_delay=historical_delay,
@@ -220,7 +261,7 @@ class StockAnalyzer:
 
             # Check if historical_data is None or empty
             if historical_data is None or historical_data.empty:
-                error_msg = f"Insufficient market data for {symbol}"
+                error_msg = f"Insufficient historical data for {symbol}"
                 logger.error(error_msg)
                 return {"error": error_msg}
 
@@ -232,10 +273,15 @@ class StockAnalyzer:
 
             # Add delay after market data fetching
             time.sleep(other_delay)
+            logger.info(f"Calculating technical indicators for {symbol}")
 
             # Step 2: Calculate technical indicators
             indicators = TechnicalIndicators(historical_data)
             technical_indicators = indicators.calculate_all_indicators()
+
+            # Add small delay
+            time.sleep(other_delay / 2)
+            logger.info(f"Generating prediction for {symbol}")
 
             # Step 3: Generate prediction
             model = StockPredictionModel(historical_data, indicators)
@@ -247,6 +293,10 @@ class StockAnalyzer:
                 return {"error": error_msg}
 
             direction = prediction.get("direction")
+
+            # Add small delay
+            time.sleep(other_delay / 2)
+            logger.info(f"Calculating price targets for {symbol}")
 
             # Step 4: Calculate price targets
             price_targets = PriceTargets(historical_data, indicators)
@@ -260,11 +310,34 @@ class StockAnalyzer:
             target_price = targets.get("target_price")
             stop_loss = targets.get("stop_loss_price")
 
-            # Step 5: Analyze options
-            option_analyzer = OptionAnalysis(historical_data, option_chain)
-            option_analysis = option_analyzer.analyze_options(
-                current_price, direction, target_price, stop_loss
-            )
+            # Add small delay
+            time.sleep(other_delay / 2)
+            logger.info(f"Analyzing options for {symbol}")
+
+            # Step 5: Analyze options - only if option chain is available
+            if option_chain is not None and not option_chain.empty:
+                option_analyzer = OptionAnalysis(historical_data, option_chain)
+                option_analysis = option_analyzer.analyze_options(
+                    current_price, direction, target_price, stop_loss
+                )
+            else:
+                logger.info(f"No option chain data available for {symbol}")
+                # Create empty option analysis
+                option_analysis = {
+                    "underlying_strike": None,
+                    "selected_strike": None,
+                    "strike_type": None,
+                    "options_iv_percentile": None,
+                    "max_pain_price": None,
+                    "open_interest_analysis": "Option data not available",
+                    "option_current_price": None,
+                    "option_target_price": None,
+                    "option_stop_loss": None
+                }
+
+            # Add small delay
+            time.sleep(other_delay / 2)
+            logger.info(f"Analyzing risk factors for {symbol}")
 
             # Step 6: Assess risk factors
             risk_analyzer = RiskFactors(symbol, current_price)
@@ -332,6 +405,14 @@ class StockAnalyzer:
                 "market_status": market_data.get("market_status")
             }
 
+            # Save results to cache
+            try:
+                with open(cache_file, 'w') as f:
+                    json.dump(results, f)
+                logger.info(f"Saved analysis for {symbol} to cache")
+            except Exception as e:
+                logger.warning(f"Could not save analysis to cache: {e}")
+
             logger.info(f"Analysis completed for {symbol}")
             return results
 
@@ -342,7 +423,7 @@ class StockAnalyzer:
 
     def analyze_multiple_stocks(self, symbols: List[str]) -> Dict[str, Dict]:
         """
-        Analyze multiple stocks.
+        Analyze multiple stocks SEQUENTIALLY, one by one.
 
         Args:
             symbols: List of stock symbols to analyze
@@ -350,13 +431,22 @@ class StockAnalyzer:
         Returns:
             Dictionary mapping symbols to their analysis results
         """
+        logger.info(f"Starting sequential analysis of {len(symbols)} stocks")
         results = {}
 
-        for symbol in symbols:
+        for i, symbol in enumerate(symbols):
             try:
+                logger.info(f"Analyzing stock {i+1}/{len(symbols)}: {symbol}")
                 results[symbol] = self.analyze_stock(symbol)
+
+                # Add a delay between stocks to avoid rate limiting
+                if i < len(symbols) - 1:  # If not the last stock
+                    logger.info(f"Waiting before analyzing next stock...")
+                    time.sleep(5)  # 5 second delay between stocks
+
             except Exception as e:
                 logger.error(f"Error analyzing {symbol}: {str(e)}")
                 results[symbol] = {"error": str(e)}
 
+        logger.info(f"Completed sequential analysis of {len(symbols)} stocks")
         return results

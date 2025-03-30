@@ -11,6 +11,8 @@ import random
 from tqdm import tqdm
 
 import uvicorn
+import json
+import datetime
 from fastapi import FastAPI
 from loguru import logger
 
@@ -63,13 +65,13 @@ def run_api_server():
 
 
 def run_analysis(
-    symbols: List[str],
-    output_csv: bool = True,
-    output_json: bool = True,
-    historical_delay: float = 0.5,  # Delay for historical data API (Zerodha allows 3/second)
-    other_delay: float = 0.2,      # Delay for other API calls (Zerodha allows 10/second)
-    retry_delay: float = 60.0,     # Delay when rate limit is hit
-    max_retries: int = 3           # Maximum number of retries
+        symbols: List[str],
+        output_csv: bool = True,
+        output_json: bool = True,
+        historical_delay: float = 0.5,  # Delay for historical data API
+        other_delay: float = 0.2,  # Delay for other API calls
+        retry_delay: float = 60.0,  # Delay when rate limit is hit
+        max_retries: int = 3  # Maximum number of retries
 ):
     """
     Run stock analysis for specified symbols sequentially to respect API rate limits.
@@ -95,17 +97,58 @@ def run_analysis(
         other_error_count = 0
 
         logger.info(f"Analyzing {total_symbols} stocks sequentially with rate limiting...")
+        logger.info(
+            f"Using historical_delay={historical_delay}s, other_delay={other_delay}s, retry_delay={retry_delay}s")
+
+        # Create cache directory if it doesn't exist
+        os.makedirs(os.path.join("output", "cache"), exist_ok=True)
+        os.makedirs(os.path.join("output", "historical_cache"), exist_ok=True)
 
         # Sequential processing with progress bar
         with tqdm(total=total_symbols, desc="Analyzing stocks") as pbar:
             for i, symbol in enumerate(symbols):
-                logger.info(f"Analyzing {symbol} ({i+1}/{total_symbols})")
+                logger.info(f"Starting analysis for {symbol} ({i + 1}/{total_symbols})")
+
+                # Add delay before each symbol
+                if i > 0:
+                    pause_time = 5  # 5 seconds between symbols
+                    logger.info(f"Waiting {pause_time}s before starting next symbol...")
+                    time.sleep(pause_time)
+
+                # Check if we already have results for this symbol from a previous run
+                result_cache_file = os.path.join("output", "cache", f"{symbol.lower()}.json")
+                if os.path.exists(result_cache_file):
+                    try:
+                        with open(result_cache_file, 'r') as f:
+                            cached_result = json.load(f)
+
+                        # Check if result is from today
+                        if "analysis_timestamp" in cached_result:
+                            timestamp = cached_result["analysis_timestamp"]
+                            try:
+                                analysis_date = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S").date()
+                                today = datetime.datetime.now().date()
+
+                                if analysis_date == today:
+                                    logger.info(f"Using cached analysis for {symbol} from today")
+                                    all_results[symbol] = cached_result
+                                    successful_count += 1
+                                    pbar.update(1)
+                                    logger.info(
+                                        f"Completed {i + 1}/{total_symbols} symbols. {total_symbols - (i + 1)} remaining.")
+                                    continue
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        logger.warning(f"Could not load cached result for {symbol}: {e}")
 
                 # Attempt analysis with retries
                 retry_count = 0
+                current_retry_delay = retry_delay
+
                 while retry_count <= max_retries:
                     try:
-                        # Analyze the stock
+                        # Analyze the stock with specified delays
                         result = analyzer.analyze_stock_with_rate_limits(
                             symbol,
                             historical_delay=historical_delay,
@@ -119,19 +162,22 @@ def run_analysis(
                         if "error" not in result:
                             successful_count += 1
                             logger.info(f"Successfully analyzed {symbol}")
+                            break  # Break retry loop on success
                         else:
-                            if "rate limit" in result["error"].lower():
+                            if "rate limit" in result["error"].lower() or "too many requests" in result[
+                                "error"].lower():
                                 rate_limited_count += 1
-                                logger.warning(f"Rate limit hit for {symbol}, retrying after delay")
-                                time.sleep(retry_delay)
+                                logger.warning(
+                                    f"Rate limit hit for {symbol}, retrying after delay of {current_retry_delay}s")
+                                time.sleep(current_retry_delay)
+                                # Increase delay for next retry
+                                current_retry_delay *= 2  # Exponential backoff
                                 retry_count += 1
                                 continue
                             else:
                                 other_error_count += 1
                                 logger.error(f"Error analyzing {symbol}: {result['error']}")
-
-                        # Break retry loop on success or non-rate-limit error
-                        break
+                                break  # Break on non-rate-limit error
 
                     except Exception as e:
                         error_msg = str(e)
@@ -141,8 +187,10 @@ def run_analysis(
                         if "too many requests" in error_msg.lower() or "rate limit" in error_msg.lower():
                             rate_limited_count += 1
                             if retry_count < max_retries:
-                                logger.warning(f"Rate limit hit for {symbol}, retrying after delay ({retry_count+1}/{max_retries})")
-                                time.sleep(retry_delay)
+                                logger.warning(
+                                    f"Rate limit hit for {symbol}, retrying after delay of {current_retry_delay}s ({retry_count + 1}/{max_retries})")
+                                time.sleep(current_retry_delay)
+                                current_retry_delay *= 2  # Exponential backoff
                                 retry_count += 1
                                 continue
 
@@ -154,8 +202,10 @@ def run_analysis(
                 # Update progress
                 pbar.update(1)
 
-                # Add small delay between symbols
-                time.sleep(other_delay)
+                # Log progress
+                remaining = total_symbols - (i + 1)
+                if remaining > 0:
+                    logger.info(f"Completed {i + 1}/{total_symbols} symbols. {remaining} remaining.")
 
         # Show summary
         logger.info(f"Analysis summary:")

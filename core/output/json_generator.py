@@ -33,6 +33,7 @@ class JSONGenerator:
     - Save JSON to file
     - Support for single or multiple stock analyses
     - Include metadata and organization by sections
+    - Merge with existing JSON data
     """
 
     def __init__(self, filename: Optional[str] = None):
@@ -51,7 +52,7 @@ class JSONGenerator:
 
     def generate_json(self, analysis_results: Dict) -> str:
         """
-        Generate JSON from analysis results.
+        Generate JSON from analysis results, preserving existing data.
 
         Args:
             analysis_results: Dictionary with analysis results for one or more stocks
@@ -60,29 +61,64 @@ class JSONGenerator:
             Path to generated JSON file
         """
         try:
-            # Check if results is for a single stock or multiple stocks
+            # Try to load existing JSON data
+            existing_data = None
+            if os.path.exists(self.filename) and os.path.getsize(self.filename) > 0:
+                try:
+                    with open(self.filename, 'r') as f:
+                        existing_data = json.load(f)
+                    logger.info(f"Loaded existing JSON data")
+                except Exception as e:
+                    logger.warning(f"Could not read existing JSON file: {str(e)}")
+
+            # Structure the new results
             if "symbol" in analysis_results:
                 # Single stock, structure it
-                structured_results = {
-                    "metadata": {
-                        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "version": "1.0.0"
-                    },
-                    "stocks": [self._structure_stock_data(analysis_results)]
-                }
+                new_structured_stocks = [self._structure_stock_data(analysis_results)]
             else:
                 # Multiple stocks
                 valid_results = [result for symbol, result in analysis_results.items()
-                                 if "error" not in result]
+                              if "error" not in result]
+
+                new_structured_stocks = [self._structure_stock_data(result) for result in valid_results]
+
+            # Create or update the structured results
+            if existing_data and "stocks" in existing_data:
+                # Get existing symbols
+                existing_symbols = {stock["basic_info"]["symbol"] for stock in existing_data["stocks"]}
+
+                # Filter out new stocks that already exist in the existing data
+                new_symbols = {stock["basic_info"]["symbol"] for stock in new_structured_stocks}
+
+                # Keep existing stocks that aren't being updated
+                filtered_existing_stocks = [stock for stock in existing_data["stocks"]
+                                          if stock["basic_info"]["symbol"] not in new_symbols]
+
+                # Combine existing and new stocks
+                combined_stocks = filtered_existing_stocks + new_structured_stocks
 
                 structured_results = {
                     "metadata": {
                         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "version": "1.0.0",
-                        "stock_count": len(valid_results)
+                        "stock_count": len(combined_stocks)
                     },
-                    "stocks": [self._structure_stock_data(result) for result in valid_results]
+                    "stocks": combined_stocks
                 }
+
+                logger.info(f"Combined existing and new data: {len(combined_stocks)} total stocks")
+            else:
+                # Create new structured results with just the new data
+                structured_results = {
+                    "metadata": {
+                        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "version": "1.0.0",
+                        "stock_count": len(new_structured_stocks)
+                    },
+                    "stocks": new_structured_stocks
+                }
+
+                logger.info(f"Using new data only: {len(new_structured_stocks)} stocks")
 
             # Write to JSON file with the custom encoder
             with open(self.filename, 'w') as f:
